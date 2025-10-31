@@ -1,8 +1,13 @@
 import os
 import logging
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
+import asyncio
+from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram.ext import (
+    Updater, CommandHandler, MessageHandler, Filters, 
+    ConversationHandler, CallbackContext
+)
 import aiohttp
+import json
 
 # Настройка логирования
 logging.basicConfig(
@@ -17,8 +22,11 @@ DEEPSEEK_API_KEY = os.environ.get('DEEPSEEK_API_KEY')
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
 
 # Проверка переменных окружения
-if not BOT_TOKEN or not DEEPSEEK_API_KEY:
-    logger.error("❌ Не установлены BOT_TOKEN или DEEPSEEK_API_KEY")
+if not BOT_TOKEN:
+    logger.error("❌ BOT_TOKEN не установлен!")
+    exit(1)
+if not DEEPSEEK_API_KEY:
+    logger.error("❌ DEEPSEEK_API_KEY не установлен!")
     exit(1)
 
 # Состояния для диалога
@@ -47,82 +55,125 @@ async def call_deepseek_api(prompt: str) -> str:
                 else:
                     error_text = await response.text()
                     logger.error(f"API Error: {response.status} - {error_text}")
-                    return f"❌ Ошибка API: {response.status}"
+                    return f"❌ Ошибка API DeepSeek: {response.status}"
     except Exception as e:
         logger.error(f"Connection error: {str(e)}")
-        return f"❌ Ошибка соединения: {str(e)}"
+        return f"❌ Ошибка соединения с DeepSeek: {str(e)}"
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text(
-        "🔧 **Расчет токов двигателя**\n\n"
+def start(update: Update, context: CallbackContext) -> int:
+    user = update.message.from_user
+    logger.info(f"Пользователь {user.first_name} начал диалог")
+    
+    update.message.reply_text(
+        "🔧 *Расчет токов двигателя*\n\n"
         "Я помогу рассчитать номинальный ток электродвигателя.\n\n"
-        "Введите номинальную мощность двигателя (кВт):"
+        "*Введите номинальную мощность двигателя (кВт):*",
+        parse_mode='Markdown'
     )
     return POWER
 
-async def power_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+def power_input(update: Update, context: CallbackContext) -> int:
     try:
         power = float(update.message.text.replace(',', '.'))
         if power <= 0:
-            await update.message.reply_text("❌ Мощность должна быть положительным числом!")
+            update.message.reply_text("❌ Мощность должна быть положительным числом!")
             return POWER
             
         context.user_data['power'] = power
-        await update.message.reply_text("⚡ Введите напряжение питания (В):")
+        update.message.reply_text(
+            "⚡ *Введите напряжение питания (В):*",
+            parse_mode='Markdown'
+        )
         return VOLTAGE
     except ValueError:
-        await update.message.reply_text("❌ Пожалуйста, введите корректное число для мощности!")
+        update.message.reply_text("❌ Пожалуйста, введите корректное число для мощности!")
         return POWER
 
-async def voltage_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+def voltage_input(update: Update, context: CallbackContext) -> int:
     try:
         voltage = float(update.message.text.replace(',', '.'))
         if voltage <= 0:
-            await update.message.reply_text("❌ Напряжение должно быть положительным числом!")
+            update.message.reply_text("❌ Напряжение должно быть положительным числом!")
             return VOLTAGE
             
         context.user_data['voltage'] = voltage
-        await update.message.reply_text("🎯 Введите КПД двигателя (в %, например 85):")
+        update.message.reply_text(
+            "🎯 *Введите КПД двигателя (в %, например 85):*",
+            parse_mode='Markdown'
+        )
         return EFFICIENCY
     except ValueError:
-        await update.message.reply_text("❌ Пожалуйста, введите корректное число для напряжения!")
+        update.message.reply_text("❌ Пожалуйста, введите корректное число для напряжения!")
         return VOLTAGE
 
-async def efficiency_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+def efficiency_input(update: Update, context: CallbackContext) -> int:
     try:
         efficiency = float(update.message.text.replace(',', '.'))
         if efficiency <= 0 or efficiency > 100:
-            await update.message.reply_text("❌ КПД должен быть в диапазоне 0-100%!")
+            update.message.reply_text("❌ КПД должен быть в диапазоне 0-100%!")
             return EFFICIENCY
             
         context.user_data['efficiency'] = efficiency
-        await update.message.reply_text("📊 Введите коэффициент мощности (cos φ, например 0.85):")
+        update.message.reply_text(
+            "📊 *Введите коэффициент мощности (cos φ, например 0.85):*",
+            parse_mode='Markdown'
+        )
         return POWER_FACTOR
     except ValueError:
-        await update.message.reply_text("❌ Пожалуйста, введите корректное число для КПД!")
+        update.message.reply_text("❌ Пожалуйста, введите корректное число для КПД!")
         return EFFICIENCY
 
-async def power_factor_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+def power_factor_input(update: Update, context: CallbackContext) -> int:
     try:
         power_factor = float(update.message.text.replace(',', '.'))
         if power_factor <= 0 or power_factor > 1:
-            await update.message.reply_text("❌ Коэффициент мощности должен быть в диапазоне 0-1!")
+            update.message.reply_text("❌ Коэффициент мощности должен быть в диапазоне 0-1!")
             return POWER_FACTOR
             
         context.user_data['power_factor'] = power_factor
-        await update.message.reply_text("🔢 Введите количество фаз (1 или 3):")
+        
+        # Создаем клавиатуру для выбора фаз
+        keyboard = [['1', '3']]
+        reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
+        
+        update.message.reply_text(
+            "🔢 *Выберите количество фаз:*",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
         return PHASE
     except ValueError:
-        await update.message.reply_text("❌ Пожалуйста, введите корректное число для коэффициента мощности!")
+        update.message.reply_text("❌ Пожалуйста, введите корректное число для коэффициента мощности!")
         return POWER_FACTOR
 
-async def phase_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+def phase_input(update: Update, context: CallbackContext) -> int:
     try:
         phase = int(update.message.text)
         if phase not in [1, 3]:
-            await update.message.reply_text("❌ Пожалуйста, введите 1 или 3 для количества фаз!")
+            update.message.reply_text("❌ Пожалуйста, выберите 1 или 3 для количества фаз!")
             return PHASE
         
+        context.user_data['phase'] = phase
+        
+        # Убираем клавиатуру
+        update.message.reply_text(
+            "⏳ *Выполняю расчет с помощью DeepSeek...*",
+            reply_markup=ReplyKeyboardRemove(),
+            parse_mode='Markdown'
+        )
+        
+        # Запускаем асинхронный расчет
+        asyncio.run(perform_calculation(update, context))
+        
+        return ConversationHandler.END
+        
+    except ValueError:
+        update.message.reply_text("❌ Пожалуйста, введите корректное число фаз!")
+        return PHASE
+
+async def perform_calculation(update: Update, context: CallbackContext):
+    """Асинхронная функция для выполнения расчета"""
+    try:
         data = context.user_data
         
         # Формируем запрос для DeepSeek
@@ -132,10 +183,10 @@ async def phase_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         - Напряжение: {data['voltage']} В
         - КПД: {data['efficiency']}%
         - Коэффициент мощности: {data['power_factor']}
-        - Количество фаз: {phase}
+        - Количество фаз: {data['phase']}
         
         Предоставь подробный расчет с формулами и объяснениями:
-        1. Формула расчета для {phase}-фазной сети
+        1. Формула расчета для {data['phase']}-фазной сети
         2. Пошаговый расчет с подстановкой значений
         3. Итоговое значение тока в Амперах
         4. Рекомендации по выбору защитной аппаратуры (автоматический выключатель, тепловое реле)
@@ -145,73 +196,92 @@ async def phase_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         Используй только русский язык в ответе.
         """
         
-        # Отправляем сообщение о начале расчета
-        processing_msg = await update.message.reply_text("⏳ Выполняю расчет с помощью DeepSeek...")
-        
         # Вызываем DeepSeek API
         deepseek_response = await call_deepseek_api(prompt)
         
-        # Удаляем сообщение "Выполняю расчет..."
-        await context.bot.delete_message(
-            chat_id=update.effective_chat.id,
-            message_id=processing_msg.message_id
-        )
+        # Отправляем результат
+        result_text = f"🔧 *Результаты расчета:*\n\n{deepseek_response}"
         
-        # Отправляем результат (разбиваем на части если слишком длинный)
-        result_text = f"🔧 **Результаты расчета:**\n\n{deepseek_response}"
-        
+        # Разбиваем длинные сообщения
         if len(result_text) > 4096:
             for x in range(0, len(result_text), 4096):
-                await update.message.reply_text(result_text[x:x+4096])
+                update.message.reply_text(
+                    result_text[x:x+4096],
+                    parse_mode='Markdown'
+                )
         else:
-            await update.message.reply_text(result_text)
+            update.message.reply_text(
+                result_text,
+                parse_mode='Markdown'
+            )
         
         # Очищаем данные пользователя
         context.user_data.clear()
         
-        return ConversationHandler.END
-        
-    except ValueError:
-        await update.message.reply_text("❌ Пожалуйста, введите корректное число фаз!")
-        return PHASE
+    except Exception as e:
+        logger.error(f"Ошибка при расчете: {e}")
+        update.message.reply_text(
+            "❌ Произошла ошибка при расчете. Попробуйте снова.",
+            reply_markup=ReplyKeyboardRemove()
+        )
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text("❌ Расчет отменен")
+def cancel(update: Update, context: CallbackContext) -> int:
+    user = update.message.from_user
+    logger.info(f"Пользователь {user.first_name} отменил диалог")
+    
+    update.message.reply_text(
+        "❌ Расчет отменен",
+        reply_markup=ReplyKeyboardRemove()
+    )
     context.user_data.clear()
     return ConversationHandler.END
 
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+def error_handler(update: Update, context: CallbackContext):
+    """Обработчик ошибок"""
     logger.error(f"Ошибка: {context.error}", exc_info=context.error)
-    if update and update.message:
-        await update.message.reply_text("❌ Произошла ошибка. Попробуйте снова.")
+    
+    try:
+        if update and update.message:
+            update.message.reply_text(
+                "❌ Произошла ошибка. Попробуйте снова.",
+                reply_markup=ReplyKeyboardRemove()
+            )
+    except Exception as e:
+        logger.error(f"Ошибка при отправке сообщения об ошибке: {e}")
 
 def main():
+    """Запуск бота"""
     try:
-        # Создаем приложение бота
-        application = Application.builder().token(BOT_TOKEN).build()
+        # Создаем Updater и передаем ему токен бота
+        updater = Updater(BOT_TOKEN, use_context=True)
         
-        # Настройка обработчиков
+        # Получаем диспетчер для регистрации обработчиков
+        dp = updater.dispatcher
+        
+        # Настройка обработчиков диалога
         conv_handler = ConversationHandler(
             entry_points=[CommandHandler('start', start)],
             states={
-                POWER: [MessageHandler(filters.TEXT & ~filters.COMMAND, power_input)],
-                VOLTAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, voltage_input)],
-                EFFICIENCY: [MessageHandler(filters.TEXT & ~filters.COMMAND, efficiency_input)],
-                POWER_FACTOR: [MessageHandler(filters.TEXT & ~filters.COMMAND, power_factor_input)],
-                PHASE: [MessageHandler(filters.TEXT & ~filters.COMMAND, phase_input)],
+                POWER: [MessageHandler(Filters.text & ~Filters.command, power_input)],
+                VOLTAGE: [MessageHandler(Filters.text & ~Filters.command, voltage_input)],
+                EFFICIENCY: [MessageHandler(Filters.text & ~Filters.command, efficiency_input)],
+                POWER_FACTOR: [MessageHandler(Filters.text & ~Filters.command, power_factor_input)],
+                PHASE: [MessageHandler(Filters.text & ~Filters.command, phase_input)],
             },
-            fallbacks=[CommandHandler('cancel', cancel)]
+            fallbacks=[CommandHandler('cancel', cancel)],
+            allow_reentry=True
         )
         
-        application.add_handler(conv_handler)
-        application.add_error_handler(error_handler)
+        dp.add_handler(conv_handler)
+        dp.add_error_handler(error_handler)
         
         # Команда для прямого расчета
-        application.add_handler(CommandHandler("calc", start))
+        dp.add_handler(CommandHandler("calc", start))
         
         # Запускаем бота
-        print("🤖 Бот запущен на Render...")
-        application.run_polling()
+        logger.info("🤖 Бот запущен...")
+        updater.start_polling()
+        updater.idle()
         
     except Exception as e:
         logger.error(f"Ошибка при запуске бота: {e}")
