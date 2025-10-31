@@ -7,7 +7,6 @@ from telegram.ext import (
     ConversationHandler, CallbackContext
 )
 import aiohttp
-import json
 
 # Настройка логирования
 logging.basicConfig(
@@ -19,15 +18,15 @@ logger = logging.getLogger(__name__)
 # Получаем переменные окружения
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 DEEPSEEK_API_KEY = os.environ.get('DEEPSEEK_API_KEY')
-DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
 
-# Проверка переменных окружения
 if not BOT_TOKEN:
     logger.error("❌ BOT_TOKEN не установлен!")
     exit(1)
 if not DEEPSEEK_API_KEY:
     logger.error("❌ DEEPSEEK_API_KEY не установлен!")
     exit(1)
+
+DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
 
 # Состояния для диалога
 POWER, VOLTAGE, EFFICIENCY, POWER_FACTOR, PHASE = range(5)
@@ -55,10 +54,10 @@ async def call_deepseek_api(prompt: str) -> str:
                 else:
                     error_text = await response.text()
                     logger.error(f"API Error: {response.status} - {error_text}")
-                    return f"❌ Ошибка API DeepSeek: {response.status}"
+                    return f"❌ Ошибка API: {response.status}"
     except Exception as e:
         logger.error(f"Connection error: {str(e)}")
-        return f"❌ Ошибка соединения с DeepSeek: {str(e)}"
+        return f"❌ Ошибка соединения: {str(e)}"
 
 def start(update: Update, context: CallbackContext) -> int:
     user = update.message.from_user
@@ -162,8 +161,11 @@ def phase_input(update: Update, context: CallbackContext) -> int:
             parse_mode='Markdown'
         )
         
-        # Запускаем асинхронный расчет
-        asyncio.run(perform_calculation(update, context))
+        # Запускаем асинхронный расчет в отдельном потоке
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        result = loop.run_until_complete(perform_calculation(update, context))
+        loop.close()
         
         return ConversationHandler.END
         
